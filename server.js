@@ -5,12 +5,12 @@ const app = express();
 const port = process.env.PORT || 3000;
 app.use(express.static('public'));
 
-const UA = 'Mozilla/5.0 (compatible; CryptoScopeCrawler/2.0; +https://example.invalid/bot)';
+const UA = 'Mozilla/5.0 (compatible; CryptoScopeCrawler/2.2; +https://example.invalid/bot)';
 const TIMEOUT = 10000;
 const MAX_CONCURRENCY = 6;
 const MAX_CATALOG_PAGES = 30;
 const history = new Map();
-const cache = { all:{ts:0,data:null}, meme:{ts:0,data:null} };
+const cache = { all:{ts:0,data:null}, meme:{ts:0,data:null}, ph:{ts:0,data:null}, global:{ts:0,data:null} };
 
 const commonSources = [
   { name:'DexScreener', url:'https://dexscreener.com/', type:'market' },
@@ -82,6 +82,11 @@ function finishScore(token,s){const key=`${s.mode}:${token.id}`,prev=history.get
 
 async function runScan(mode='all',force=false){mode=mode==='meme'?'meme':'all';const c=cache[mode];if(!force&&c.data&&Date.now()-c.ts<120000)return c.data;const sourceList=[...commonSources,...modeSources[mode]];const tasks=[fetchCatalog(mode),mapLimit(sourceList,MAX_CONCURRENCY,fetchText)];if(mode==='all')tasks.push(fetchCategoryMembership());const[catalogPages,otherPages,categoryPages=[]]=await Promise.all(tasks);const{found,bySymbol}=buildUniverse(catalogPages,mode);if(mode==='all')indexCategories(found,categoryPages);indexPageEvidence(found,bySymbol,otherPages);const newsItems=otherPages.filter(p=>p.ok&&p.type==='news').flatMap(p=>extractNews(p.text));indexNews(bySymbol,newsItems);const scorer=mode==='meme'?scoreMeme:scoreGeneral;const tokens=[...found.values()].map(scorer);tokens.sort((a,b)=>(b.action==='BUY CANDIDATE')-(a.action==='BUY CANDIDATE')||b.opportunity-a.opportunity||b.mentions-a.mentions||a.symbol.localeCompare(b.symbol));const sourceHealth=[...catalogPages,...otherPages,...categoryPages].map(p=>({name:p.name,type:p.type,ok:p.ok,error:p.error||null}));const result={mode,generatedAt:new Date().toISOString(),methodology:mode==='meme'?'MemeWatch: public-web meme catalog with sentiment/rug-risk override.':'CryptoScope: broad public-web crypto catalog with opportunity, quality and risk scoring.',catalogCount:tokens.filter(t=>t.catalog).length,totalTokens:tokens.length,sourceHealth,warnings:['Signals are heuristic and do not guarantee profit.','Confidence measures evidence strength, not win probability.','Public HTML crawling cannot guarantee coverage of every token or observe every on-chain event in real time.','New/unlisted tokens and sources blocked by site controls may be missing.'],tokens};cache[mode]={ts:Date.now(),data:result};return result;}
 
+function parseTrendingTable(html){const $=cheerio.load(html||'');const rows=[];$('table tbody tr').each((i,tr)=>{const link=$(tr).find('a[href*="/en/coins/"]').first();if(!link.length)return;const href=link.attr('href')||'';const slug=(href.match(/\/en\/coins\/([^/?#]+)/)||[])[1]||'';const coinText=link.text().replace(/\s+/g,' ').trim();const parts=coinText.split(' ').filter(Boolean);let symbol='';for(let j=parts.length-1;j>=0;j--){const p=parts[j].replace(/^\$+/,'');if(/^[A-Za-z0-9._-]{1,15}$/.test(p)&&/[A-Za-z]/.test(p)){symbol=p.toUpperCase();parts.splice(j,1);break;}}const name=parts.join(' ').trim()||slug.replace(/-/g,' ');const td=$(tr).find('td').map((_,el)=>$(el).text().replace(/\s+/g,' ').trim()).get();const pct=td.filter(x=>/^-?\d+(?:\.\d+)?%$/.test(x));const money=td.filter(x=>/^\$/.test(x));const rank=td.map(x=>Number(x.replace(/,/g,''))).find(x=>Number.isInteger(x)&&x>0&&x<100000)||null;rows.push({trendRank:i+1,marketRank:rank,name,symbol,slug,price:money[0]||null,change1h:pct[0]||null,change24h:pct[1]||null,change7d:pct[2]||null,volume24h:money[1]||null,marketCap:money[2]||null});});return rows;}
+
+async function runTrending(region='ph',force=false){region=region==='global'?'global':'ph';const c=cache[region];if(!force&&c.data&&Date.now()-c.ts<120000)return c.data;const url=region==='ph'?'https://www.coingecko.com/en/highlights/trending-crypto/philippines':'https://www.coingecko.com/en/highlights/trending-crypto';const page=await fetchText({name:region==='ph'?'CoinGecko PH Trending':'CoinGecko Global Trending',url,type:'trending'});if(!page.ok)throw new Error(page.error||'Trending source unavailable');const market=await runScan('all',false);const bySymbol=new Map(market.tokens.map(t=>[t.symbol,t]));const rows=parseTrendingTable(page.text).map(r=>({...r,...(bySymbol.get(r.symbol)||{action:'WATCH',opportunity:50,risk:50,quality:null,confidence:25,independentSources:0,bullishSignals:0,bearishSignals:0,suspiciousSignals:0,momentum:0,categories:[],evidence:[],headlines:[],hold:'Insufficient cross-source evidence.',exit:'N/A'})}));const result={region,generatedAt:new Date().toISOString(),source:'CoinGecko public trending page',rows};cache[region]={ts:Date.now(),data:result};return result;}
+
 app.get('/scan',async(req,res)=>{try{res.json(await runScan(req.query.mode,req.query.force==='1'));}catch(e){res.status(500).json({error:String(e.message||e)});}});
+app.get('/trending',async(req,res)=>{try{res.json(await runTrending(req.query.region,req.query.force==='1'));}catch(e){res.status(500).json({error:String(e.message||e)});}});
 app.get('/health',(_,res)=>res.json({ok:true,app:'CryptoScope + MemeWatch',now:new Date().toISOString()}));
 app.listen(port,()=>console.log(`CryptoScope crawler listening on ${port}`));
